@@ -1,6 +1,6 @@
 ---
 name: Host a discussion
-area: Community
+area: Discussions
 why: Discussions are open to every job, and each one is better with a host who answers from real experience and keeps a weekly thread going.
 approver: David Oragui
 window: always-open
