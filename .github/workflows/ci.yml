@@ -36,16 +36,8 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-      # Only for the pull request that first adds the checks, while main has none yet.
-      # Removed in the next pull request.
-      - name: Find the checks
-        run: |
-          if [ -f base/.github/scripts/check.mjs ]; then
-            echo "TOOLS=base/.github/scripts" >> "$GITHUB_ENV"
-          else
-            echo "TOOLS=pr/.github/scripts" >> "$GITHUB_ENV"
-          fi
       - name: Install the checks
-        run: cd "$TOOLS" && npm ci --ignore-scripts
+        working-directory: base/.github/scripts
+        run: npm ci --ignore-scripts
       - name: Markdown lint, links and project files
-        run: node "$TOOLS/check.mjs" pr
+        run: node base/.github/scripts/check.mjs pr
