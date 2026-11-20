@@ -1,0 +1,51 @@
+# Every pull request: markdown lint, link check and the project file format check.
+#
+# Security rules (don't relax these):
+# - `pull_request` only, never `pull_request_target`.
+# - Read-only token, no secrets.
+# - Nothing from the pull request is ever run. The checks come from the base branch
+#   (`base/.github/scripts`) and only read the pull request's files.
+name: CI
+
+on:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the pull request (to read, not to run)
+        uses: actions/checkout@v7
+        with:
+          path: pr
+          persist-credentials: false
+      - name: Check out the base branch (the checks come from here)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      # Only for the pull request that first adds the checks, while main has none yet.
+      # Removed in the next pull request.
+      - name: Find the checks
+        run: |
+          if [ -f base/.github/scripts/check.mjs ]; then
+            echo "TOOLS=base/.github/scripts" >> "$GITHUB_ENV"
+          else
+            echo "TOOLS=pr/.github/scripts" >> "$GITHUB_ENV"
+          fi
+      - name: Install the checks
+        run: cd "$TOOLS" && npm ci --ignore-scripts
+      - name: Markdown lint, links and project files
+        run: node "$TOOLS/check.mjs" pr

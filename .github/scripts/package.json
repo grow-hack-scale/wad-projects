@@ -1,0 +1,10 @@
+{
+  "name": "wad-projects-checks",
+  "private": true,
+  "type": "module",
+  "description": "The checks CI runs on every pull request. They read files; they never run anything from a pull request.",
+  "dependencies": {
+    "markdownlint": "0.42.2",
+    "yaml": "2.9.1"
+  }
+}

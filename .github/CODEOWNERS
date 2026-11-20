@@ -1,0 +1,6 @@
+# David approves every change to a project file, to this file and to anything under .github/.
+# The ruleset on main requires a Code Owner review, and nobody is on its bypass list,
+# so no project, criteria, approver or check can change without that approval.
+/projects/*/project.md @growhackscale
+/.github/ @growhackscale
+/CODEOWNERS @growhackscale
