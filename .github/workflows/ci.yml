@@ -1,4 +1,4 @@
-# Every pull request: markdown lint, link check and the project file format check.
+# Every pull request: markdown lint, link check, the project file format check and the rules for work sent in.
 #
 # Security rules (don't relax these):
 # - `pull_request` only, never `pull_request_target`.
@@ -39,5 +39,5 @@ jobs:
       - name: Install the checks
         working-directory: base/.github/scripts
         run: npm ci --ignore-scripts
-      - name: Markdown lint, links and project files
+      - name: Markdown lint, links, project files and work sent in
         run: node base/.github/scripts/check.mjs pr

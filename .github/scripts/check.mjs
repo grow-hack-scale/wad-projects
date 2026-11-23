@@ -1,4 +1,5 @@
-// The checks CI runs on every pull request: markdown lint, links, and the project file format.
+// The checks CI runs on every pull request: markdown lint, links, the project file format, and
+// the rules for work sent in (projects/{project}/tasks/{task}/submissions/v{n}/).
 //
 // Usage: node check.mjs <path to the checked-out pull request> [--offline]
 //
@@ -6,7 +7,7 @@
 // anything from it, and it never follows a symlink. CI runs this copy from the base branch, so a
 // pull request cannot change the checks that judge it.
 
-import { lstat, readFile, readdir } from "node:fs/promises";
+import { lstat, open, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { lint } from "markdownlint/promise";
 import { parse as parseYaml } from "yaml";
@@ -19,6 +20,7 @@ const fail = (file, msg) => errors.push(`${file}: ${msg}`);
 const warn = (file, msg) => warnings.push(`${file}: ${msg}`);
 
 // ---- Walk the tree (no symlinks, nothing hidden except .github) ------------------------------
+const stats = new Map();
 async function walk(dir, out = []) {
   for (const name of (await readdir(dir)).sort()) {
     if (name === ".git" || name === "node_modules") continue;
@@ -27,7 +29,10 @@ async function walk(dir, out = []) {
     const st = await lstat(full);
     if (st.isSymbolicLink()) fail(rel, "symlinks aren't allowed in this repo");
     else if (st.isDirectory()) await walk(full, out);
-    else if (st.isFile()) out.push(rel);
+    else if (st.isFile()) {
+      out.push(rel);
+      stats.set(rel, { size: st.size, runs: (st.mode & 0o111) !== 0 });
+    }
   }
   return out;
 }
@@ -107,6 +112,90 @@ export function checkProject(file, text, dirSlug) {
   });
   if (parts.body.length > 20000) bad("the text under the frontmatter is over 20,000 characters");
   if (/<[a-z!/][^>]*>/i.test(parts.body.replace(/<https?:[^>\s]+>/g, ""))) bad("no HTML in the text; use markdown");
+  return seen;
+}
+
+// ---- Work sent in -----------------------------------------------------------------------------
+// The We Are Distributed Projects app writes a version as one folder:
+//   projects/{project}/tasks/{task}/submissions/v{n}/
+// holding work.md (the text), evidence.md (links, and files kept outside the repo) and up to five
+// small files. Nothing else belongs under tasks/. These rules match the app's (wad-community,
+// src/projects/repo.ts and work.ts); change both together.
+export const SUBMISSION = { maxFiles: 5, maxBytes: 2 * 1024 * 1024, maxTextBytes: 200_000 };
+const SUBMISSION_FILE = /^[a-z0-9][a-z0-9_-]{0,63}\.(png|jpg|webp|pdf|txt|md)$/;
+const VERSION = /^v[1-9][0-9]{0,3}$/;
+
+async function head(file, n = 16) {
+  const fh = await open(path.join(root, file), "r");
+  try {
+    const { buffer, bytesRead } = await fh.read(Buffer.alloc(n), 0, n, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    await fh.close();
+  }
+}
+
+/** What a file is, from its first bytes. The extension is a claim; this is the check. */
+export function kindOf(b) {
+  const at = (sig, from = 0) => sig.every((x, i) => b[from + i] === x);
+  if (b.length >= 8 && at([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "png";
+  if (b.length >= 3 && at([0xff, 0xd8, 0xff])) return "jpg";
+  if (b.length >= 12 && b.subarray(0, 4).toString("latin1") === "RIFF" && b.subarray(8, 12).toString("latin1") === "WEBP") return "webp";
+  if (b.length >= 5 && b.subarray(0, 5).toString("latin1") === "%PDF-") return "pdf";
+  return null;
+}
+
+async function checkSubmissionFile(file, name) {
+  const bad = (msg) => fail(file, msg);
+  const st = stats.get(file);
+  if (st.runs) bad("is marked as a program; files here are never run");
+  if (!SUBMISSION_FILE.test(name)) {
+    return bad("isn't a file the app sends: lower-case names ending .md, .txt, .png, .jpg, .webp or .pdf only (video is linked, not committed)");
+  }
+  const ext = name.split(".").pop();
+  if (ext === "md" || ext === "txt") {
+    if (ext === "md" && name !== "work.md" && name !== "evidence.md") bad("the only markdown files in a version are work.md and evidence.md");
+    if (st.size > SUBMISSION.maxTextBytes) return bad(`is over ${SUBMISSION.maxTextBytes / 1000} KB of text`);
+    let text;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(await readFile(path.join(root, file)));
+    } catch {
+      return bad("isn't plain text");
+    }
+    // eslint-disable-next-line no-control-regex
+    if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(text)) return bad("isn't plain text");
+    const prose = text.replace(/```[\s\S]*?```/g, "").replace(/`[^`\n]*`/g, "").replace(/<https:[^>\s]+>/g, "");
+    if (/<\s*[a-z!/?][^>]*>/i.test(prose)) bad("no HTML in work sent in; use markdown");
+    return;
+  }
+  if (st.size > SUBMISSION.maxBytes) return bad(`is over ${SUBMISSION.maxBytes / 1024 / 1024} MB; larger files are linked from evidence.md, not committed`);
+  const kind = kindOf(await head(file));
+  if (kind !== ext) bad(`is named .${ext} but ${kind ? `is a ${kind.toUpperCase()}` : "isn't a PNG, JPG, WebP or PDF"}`);
+}
+
+async function checkSubmissions(files, tasksByProject) {
+  const versions = new Map();
+  for (const file of files) {
+    const parts = file.split(path.sep);
+    if (parts[0] !== "projects" || parts.length < 3 || parts[2] === "project.md") continue;
+    const [, project, tasksDir, task, subDir, version, name, ...rest] = parts;
+    const shape = tasksDir === "tasks" && subDir === "submissions" && VERSION.test(version ?? "") && name && rest.length === 0;
+    if (!shape) {
+      fail(file, "doesn't belong here: a project holds project.md and tasks/{task}/submissions/v{n}/ only");
+      continue;
+    }
+    const tasks = tasksByProject.get(project);
+    if (tasks && !tasks.has(task)) fail(file, `"${task}" isn't a task in projects/${project}/project.md`);
+    const key = parts.slice(0, 6).join(path.sep);
+    versions.set(key, [...(versions.get(key) ?? []), name]);
+    await checkSubmissionFile(file, name);
+  }
+  for (const [folder, names] of versions) {
+    const extra = names.filter((n) => n !== "work.md" && n !== "evidence.md");
+    if (extra.length > SUBMISSION.maxFiles) fail(folder, `holds ${extra.length} files; a version carries up to ${SUBMISSION.maxFiles}`);
+    if (!names.includes("work.md") && !names.includes("evidence.md")) fail(folder, "has neither work.md nor evidence.md");
+  }
+  return versions.size;
 }
 
 // ---- Links ------------------------------------------------------------------------------------
@@ -164,16 +253,30 @@ const md = all.filter((f) => f.toLowerCase().endsWith(".md"));
 
 // 1. Every folder in projects/ has a project.md, and each one fits the format.
 const projectDirs = new Set(all.filter((f) => f.startsWith(`projects${path.sep}`)).map((f) => f.split(path.sep)[1]));
+const tasksByProject = new Map();
 for (const dir of projectDirs) {
   const file = path.join("projects", dir, "project.md");
   if (!fileSet.has(file)) fail(path.join("projects", dir), "has no project.md");
-  else checkProject(file, await readFile(path.join(root, file), "utf8"), dir);
+  else {
+    const tasks = checkProject(file, await readFile(path.join(root, file), "utf8"), dir);
+    if (tasks) tasksByProject.set(dir, tasks);
+  }
 }
+
+// 1b. Work sent in: only where it belongs, only the file types the app sends, checked by their bytes.
+const versionCount = await checkSubmissions(all, tasksByProject);
 
 // 2. Markdown lint. The rules come from this folder, never from the pull request.
 const config = JSON.parse(await readFile(new URL("./markdownlint.json", import.meta.url), "utf8"));
 const texts = Object.fromEntries(await Promise.all(md.map(async (f) => [f, await readFile(path.join(root, f), "utf8")])));
-const linted = await lint({ strings: texts, config });
+// Work sent in is written by people who never see a linter, so the rules about how a document must
+// open and repeat its headings are off for it; everything else applies.
+const isWork = (f) => f.split(path.sep)[2] === "tasks";
+const pick = (want) => Object.fromEntries(Object.entries(texts).filter(([f]) => isWork(f) === want));
+const linted = {
+  ...(await lint({ strings: pick(false), config })),
+  ...(await lint({ strings: pick(true), config: { ...config, MD041: false, MD024: false, MD025: false, MD026: false, MD036: false } })),
+};
 for (const [file, results] of Object.entries(linted)) {
   for (const r of results) fail(file, `line ${r.lineNumber}: ${r.ruleNames[0]} ${r.ruleDescription}${r.errorDetail ? ` (${r.errorDetail})` : ""}`);
 }
@@ -201,5 +304,5 @@ if (!offline) {
 
 for (const w of warnings) console.log(`warning  ${w}`);
 for (const e of errors) console.log(`error    ${e}`);
-console.log(`\n${md.length} markdown files, ${projectDirs.size} projects, ${outside.size} outside links: ${errors.length} errors, ${warnings.length} warnings`);
+console.log(`\n${md.length} markdown files, ${projectDirs.size} projects, ${versionCount} versions of work, ${outside.size} outside links: ${errors.length} errors, ${warnings.length} warnings`);
 process.exit(errors.length ? 1 : 0);
