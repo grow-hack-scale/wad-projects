@@ -27,7 +27,7 @@ projects/
 ```
 
 - [The project file format](docs/project-file-format.md) explains `project.md`.
-- Every pull request is checked automatically: markdown lint, a link check and a format check. See [the checks](docs/checks.md).
+- Every pull request is checked automatically: markdown lint, a link check, a format check and a check on work sent in. See [the checks](docs/checks.md).
 
 ## This repo is public
 
